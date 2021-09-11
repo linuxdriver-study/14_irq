@@ -9,184 +9,253 @@
 #include <linux/of_gpio.h>
 #include <linux/types.h>
 #include <linux/ide.h>
-
-#define LED_ON          1
-#define LED_OFF         0
+#include <linux/irq.h>
+#include <linux/of_irq.h>
 
 #define DEVICE_CNT      1
-#define DEVICE_NAME     "led"
+#define DEVICE_NAME     "keyirq"
 
-struct led_device_struct {
+#define KEY_NUM         1
+#define KEY0VALUE       0x01
+#define INVAKEY         0xFF
+
+struct irq_keydesc {
+        int gpio;
+        int irqnum;
+        unsigned char value;
+        char name[10];
+        irqreturn_t (*handler)(int, void *);
+};
+
+struct keyirq_device_struct {
         int major;
         int minor;
         dev_t devid;
-        struct cdev led_cdev;
+        struct cdev keyirq_cdev;
         struct class *class;
         struct device *device;
         struct device_node *nd;
-        int gpio_led;
+        struct irq_keydesc keyirq[KEY_NUM];
 };
-static struct led_device_struct led_dev;
+static struct keyirq_device_struct keyirq_dev;
 
-static int led_open(struct inode *inode, struct file *file);
-static ssize_t led_write(struct file *file,
+static int keyirq_open(struct inode *inode, struct file *file);
+static ssize_t keyirq_write(struct file *file,
                         const char __user *user,
                         size_t count,
                         loff_t *loff);
-static int led_release(struct inode *inode, struct file *file);
+static int keyirq_release(struct inode *inode, struct file *file);
 
 static struct file_operations ops = {
         .owner = THIS_MODULE,
-        .open = led_open,
-        .write = led_write,
-        .release = led_release,
+        .open = keyirq_open,
+        .write = keyirq_write,
+        .release = keyirq_release,
 };
 
-static int led_open(struct inode *inode, struct file *file)
+static int keyirq_open(struct inode *inode, struct file *file)
 {
-        file->private_data = &led_dev;
+        file->private_data = &keyirq_dev;
         return 0;
 }
 
-static ssize_t led_write(struct file *file,
+static ssize_t keyirq_write(struct file *file,
                         const char __user *user,
                         size_t count,
                         loff_t *loff)
 {
         int ret = 0;
         unsigned char buf[1] = {0};
-        struct led_device_struct *dev = file->private_data;
+        struct keyirq_device_struct *dev = file->private_data;
 
         ret = copy_from_user(buf, user, 1);
         if (ret != 0) {
                 goto error;
         }
 
-        if (buf[0] == LED_ON) {
-                gpio_set_value(dev->gpio_led, 0);
-        } else if (buf[0] == LED_OFF) {
-                gpio_set_value(dev->gpio_led, 1);
-        } else {
-                ret = -EINVAL;
-        }
-
 error:
         return ret;
 }
 
-static int led_release(struct inode *inode, struct file *file)
+static irqreturn_t key0_handler(int irq, void *dev_id)
+{
+        int value = 0;
+        struct keyirq_device_struct *dev = dev_id;
+        printk("Enter inter!\n");
+
+        value = gpio_get_value(dev->keyirq[0].gpio);
+        if (value == 0) {
+                printk("KEY0 Press!\n");
+        } else if (value == 1) {
+                printk("KEY0 Release!\n");
+        }
+
+        return IRQ_HANDLED;
+}
+
+static int keyirq_release(struct inode *inode, struct file *file)
 {
         file->private_data = NULL;
         return 0;
 }
 
-int led_io_config(struct led_device_struct *dev)
+int key_io_config(struct keyirq_device_struct *dev)
 {
         int ret = 0;
+        int i = 0;
+        int num = 0;
+        int num_irq = 0;
 
-        dev->nd = of_find_node_by_path("/gpioled");
+        dev->nd = of_find_node_by_path("/key");
         if (dev->nd == NULL) {
-                printk("find node error!\n");
-                ret = -EFAULT;
-                goto fail_find_node;
+                printk("fail find node!\n");
+                ret = -EINVAL;
+                goto fail_nd;
         }
 
-        dev->gpio_led = of_get_named_gpio(dev->nd, "led-gpios", 0);
-        if (dev->gpio_led < 0) {
-                printk("get named error!\n");
-                ret = -EFAULT;
-                goto fail_get_named;
+        for (i = 0; i < KEY_NUM; i++) {
+                dev->keyirq[i].gpio =of_get_named_gpio(dev->nd, "key-gpios", i);
+                if (dev->keyirq[i].gpio < 0) {
+                        printk("fail get named!\n");
+                        ret = -EFAULT;
+                        goto fail_get_named;
+                }
         }
 
-        ret = gpio_request(dev->gpio_led, "led");
-        if (ret != 0) {
-                printk("gpio request error!\n");
-                goto fail_gpio_request;
+        for (i = 0; i < KEY_NUM; i++) {
+                memset(dev->keyirq[i].name, 0, sizeof(dev->keyirq[i].name));
+                sprintf(dev->keyirq[i].name, "KEY%d", i);
+                ret = gpio_request(dev->keyirq[i].gpio, dev->keyirq[i].name);
+                if (ret != 0) {
+                        printk("gpio request error!\n");
+                        ret = -EFAULT;
+                        goto fail_request;
+                }
+                num ++;
         }
 
-        ret = gpio_direction_output(dev->gpio_led, 1);
-        if (ret != 0) {
-                printk("gpio dir set error!\n");
-                goto fail_set_dir;
+        for (i = 0; i < KEY_NUM; i++) {
+                ret = gpio_direction_input(dev->keyirq[i].gpio);
+                if (ret != 0) {
+                        printk("gpio set dir error!\n");
+                        ret = -EFAULT;
+                        goto fail_set_dir;
+                }
         }
 
+        for (i = 0; i < KEY_NUM; i++) {
+#if 1
+                dev->keyirq[i].irqnum = gpio_to_irq(dev->keyirq[i].gpio);
+#else
+                dev->keyirq[i].irqnum = irq_of_parse_and_map(dev->nd, i);
+#endif
+                printk("key%d:gpio=%d, irqnum=%d\n", i, dev->keyirq[i].gpio,
+                       dev->keyirq[i].irqnum);
+        }
+
+        dev->keyirq[0].handler = key0_handler;
+        dev->keyirq[0].value = KEY0VALUE;
+
+        for (i = 0; i < KEY_NUM; i++) {
+                ret = request_irq(dev->keyirq[i].irqnum, 
+                                  dev->keyirq[i].handler, 
+                                  IRQF_TRIGGER_RISING|IRQF_TRIGGER_FALLING,
+                                  dev->keyirq[i].name,
+                                  dev);
+                if (ret) {
+                        printk("irq%d request error!\n", i);
+                        goto fail_request_irq;
+                }
+                num_irq ++;
+        }
+        goto success;
+
+fail_request_irq:
+        for (i = 0; i < num_irq; i++)
+                free_irq(dev->keyirq[i].irqnum, dev);
 fail_set_dir:
-        gpio_free(dev->gpio_led);
-fail_gpio_request:
+fail_request:
+        for (i = 0; i < num; i++)
+                gpio_free(dev->keyirq[i].gpio);
 fail_get_named:
-fail_find_node:
+fail_nd:
+success:
         return ret;
 }
 
-static int __init led_init(void)
+static int __init keyirq_init(void)
 {
         int ret = 0;
-        if (led_dev.major) {
-                led_dev.devid = MKDEV(led_dev.major, led_dev.minor);
-                ret = register_chrdev_region(led_dev.devid, DEVICE_CNT, DEVICE_NAME);
+        if (keyirq_dev.major) {
+                keyirq_dev.devid = MKDEV(keyirq_dev.major, keyirq_dev.minor);
+                ret = register_chrdev_region(keyirq_dev.devid, DEVICE_CNT, DEVICE_NAME);
         } else {
-                ret = alloc_chrdev_region(&led_dev.devid, 0, DEVICE_CNT, DEVICE_NAME);
+                ret = alloc_chrdev_region(&keyirq_dev.devid, 0, DEVICE_CNT, DEVICE_NAME);
         }
         if (ret < 0) {
                 printk("chrdev region error!\n");
                 goto fail_chrdev_region;
         }
-        led_dev.major = MAJOR(led_dev.devid);
-        led_dev.minor = MINOR(led_dev.devid);
-        printk("major:%d minor:%d\n", led_dev.major, led_dev.minor);
+        keyirq_dev.major = MAJOR(keyirq_dev.devid);
+        keyirq_dev.minor = MINOR(keyirq_dev.devid);
+        printk("major:%d minor:%d\n", keyirq_dev.major, keyirq_dev.minor);
 
-        cdev_init(&led_dev.led_cdev, &ops);
-        ret = cdev_add(&led_dev.led_cdev, led_dev.devid, DEVICE_CNT);
+        cdev_init(&keyirq_dev.keyirq_cdev, &ops);
+        ret = cdev_add(&keyirq_dev.keyirq_cdev, keyirq_dev.devid, DEVICE_CNT);
         if (ret < 0) {
                 printk("cdev add error!\n");
                 goto fail_cdev_add;
         }
-        led_dev.class = class_create(THIS_MODULE, DEVICE_NAME);
-        if (IS_ERR(led_dev.class)) {
+        keyirq_dev.class = class_create(THIS_MODULE, DEVICE_NAME);
+        if (IS_ERR(keyirq_dev.class)) {
                 printk("class create error!\n");
                 ret = -EINVAL;
                 goto fail_class_create;
         }
-        led_dev.device = device_create(led_dev.class, NULL,
-                                       led_dev.devid, NULL, DEVICE_NAME);
-        if (IS_ERR(led_dev.device)) {
+        keyirq_dev.device = device_create(keyirq_dev.class, NULL,
+                                       keyirq_dev.devid, NULL, DEVICE_NAME);
+        if (IS_ERR(keyirq_dev.device)) {
                 printk("device create error!\n");
                 ret = -EINVAL;
                 goto fail_device_create;
         }
 
-        ret = led_io_config(&led_dev);
+        ret = key_io_config(&keyirq_dev);
         if (ret != 0) {
-                printk("led io config error!\n");
+                printk("key io config error!\n");
                 goto fail_io_config;
         }
 
         goto success;
         
 fail_io_config:
-        device_destroy(led_dev.class, led_dev.devid);
+        device_destroy(keyirq_dev.class, keyirq_dev.devid);
 fail_device_create:
-        class_destroy(led_dev.class);
+        class_destroy(keyirq_dev.class);
 fail_class_create:
-        cdev_del(&led_dev.led_cdev);
+        cdev_del(&keyirq_dev.keyirq_cdev);
 fail_cdev_add:
-        unregister_chrdev_region(led_dev.devid, DEVICE_CNT);
+        unregister_chrdev_region(keyirq_dev.devid, DEVICE_CNT);
 fail_chrdev_region:
 success:
         return ret;
 }
 
-static void __exit led_exit(void)
+static void __exit keyirq_exit(void)
 {
-        gpio_set_value(led_dev.gpio_led, 1);
-        gpio_free(led_dev.gpio_led);
-        device_destroy(led_dev.class, led_dev.devid);
-        class_destroy(led_dev.class);
-        cdev_del(&led_dev.led_cdev);
-        unregister_chrdev_region(led_dev.devid, DEVICE_CNT);
+        int i = 0;
+
+        for (i = 0; i < KEY_NUM; i++)
+                free_irq(keyirq_dev.keyirq[i].irqnum, &keyirq_dev);
+        for (i = 0; i < KEY_NUM; i++)
+                gpio_free(keyirq_dev.keyirq[i].gpio);
+        device_destroy(keyirq_dev.class, keyirq_dev.devid);
+        class_destroy(keyirq_dev.class);
+        cdev_del(&keyirq_dev.keyirq_cdev);
+        unregister_chrdev_region(keyirq_dev.devid, DEVICE_CNT);
 }
 
-module_init(led_init);
-module_exit(led_exit);
+module_init(keyirq_init);
+module_exit(keyirq_exit);
 MODULE_AUTHOR("wanglei");
 MODULE_LICENSE("GPL");
