@@ -82,7 +82,6 @@ void timer_func(unsigned long arg)
 {
         int value = 0;
         struct keyirq_device_struct *dev = (struct keyirq_device_struct *)arg;
-        printk("Enter timer!\n");
 
         value = gpio_get_value(dev->keyirq[0].gpio);
         if (value == 0) {
@@ -96,7 +95,6 @@ static irqreturn_t key0_handler(int irq, void *dev_id)
 {
         struct keyirq_device_struct *dev = dev_id;
 
-        printk("Enter inter!\n");
         dev->timer.data = (unsigned long)dev;
         mod_timer(&dev->timer, jiffies + msecs_to_jiffies(10));
 
