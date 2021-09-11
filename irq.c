@@ -36,6 +36,7 @@ struct keyirq_device_struct {
         struct device *device;
         struct device_node *nd;
         struct irq_keydesc keyirq[KEY_NUM];
+        struct timer_list timer;
 };
 static struct keyirq_device_struct keyirq_dev;
 
@@ -77,11 +78,11 @@ error:
         return ret;
 }
 
-static irqreturn_t key0_handler(int irq, void *dev_id)
+void timer_func(unsigned long arg)
 {
         int value = 0;
-        struct keyirq_device_struct *dev = dev_id;
-        printk("Enter inter!\n");
+        struct keyirq_device_struct *dev = (struct keyirq_device_struct *)arg;
+        printk("Enter timer!\n");
 
         value = gpio_get_value(dev->keyirq[0].gpio);
         if (value == 0) {
@@ -89,6 +90,15 @@ static irqreturn_t key0_handler(int irq, void *dev_id)
         } else if (value == 1) {
                 printk("KEY0 Release!\n");
         }
+}
+
+static irqreturn_t key0_handler(int irq, void *dev_id)
+{
+        struct keyirq_device_struct *dev = dev_id;
+
+        printk("Enter inter!\n");
+        dev->timer.data = (unsigned long)dev;
+        mod_timer(&dev->timer, jiffies + msecs_to_jiffies(10));
 
         return IRQ_HANDLED;
 }
@@ -220,6 +230,9 @@ static int __init keyirq_init(void)
                 goto fail_device_create;
         }
 
+        init_timer(&keyirq_dev.timer);
+        keyirq_dev.timer.function = timer_func;
+
         ret = key_io_config(&keyirq_dev);
         if (ret != 0) {
                 printk("key io config error!\n");
@@ -229,6 +242,7 @@ static int __init keyirq_init(void)
         goto success;
         
 fail_io_config:
+        del_timer(&keyirq_dev.timer);
         device_destroy(keyirq_dev.class, keyirq_dev.devid);
 fail_device_create:
         class_destroy(keyirq_dev.class);
@@ -245,6 +259,7 @@ static void __exit keyirq_exit(void)
 {
         int i = 0;
 
+        del_timer(&keyirq_dev.timer);
         for (i = 0; i < KEY_NUM; i++)
                 free_irq(keyirq_dev.keyirq[i].irqnum, &keyirq_dev);
         for (i = 0; i < KEY_NUM; i++)
